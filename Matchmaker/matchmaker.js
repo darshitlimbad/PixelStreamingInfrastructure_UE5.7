@@ -17,13 +17,13 @@ const defaultConfig = {
 	// Instance Manager configuration (set enabled: false to use legacy matchmaker behavior)
 	InstanceManager: {
 		enabled: false,
-		signallingServerPath: '',
+		signallingServerDir: '',
 		signallingServerArgs: ['--serve'],
 		ueAppPath: '',
 		ueAppArgs: ['-RenderOffScreen', '-ResX=1920', '-ResY=1080', '-AudioMixer', '-ForceRes'],
 		publicIp: 'localhost',
 		playerPortRange: { start: 81, end: 100 },
-		streamerPortRange: { start: 8889, end: 8920 },
+		streamerPortRange: { start: 8890, end: 8920 },
 		minInstances: 0,
 		// Consumer NVIDIA GeForce GPUs are limited to 3 simultaneous NVENC encoders.
 		maxInstances: 3,
@@ -75,6 +75,9 @@ const instanceManager = require('./modules/instanceManager.js');
 const instanceManagerEnabled = config.InstanceManager && config.InstanceManager.enabled;
 const sessionManagerEnabled = config.SessionManager && config.SessionManager.enabled;
 
+// A list of all the Cirrus server which are connected to the Matchmaker.
+var cirrusServers = new Map();
+
 // Initialize modules if enabled
 if (instanceManagerEnabled) {
 	portPool.init({
@@ -85,13 +88,46 @@ if (instanceManagerEnabled) {
 
 if (sessionManagerEnabled) {
 	sessionManager.init(config.SessionManager, (token, session) => {
-		// Session expired callback — release the instance
-		logging.log(`Session expired for token ${token.substring(0, 8)}..., releasing instance.`);
-		if (instanceManagerEnabled && session.cirrusServerKey) {
-			const cirrusServer = cirrusServers.get(session.cirrusServerKey);
-			if (cirrusServer && cirrusServer.instanceId) {
-				instanceManager.releaseInstance(cirrusServer.instanceId);
+		// =====================================================
+		// Session expired callback
+		// Find and destroy the instance + disconnect cirrus
+		// =====================================================
+		logging.log(`Session expired for token ${token.substring(0, 8)}..., destroying instance.`);
+
+		const cirrusKey = session.cirrusServerKey;  // This is the TCP connection object
+
+		// 1. Find the cirrus server entry to get its port
+		const cirrusServer = cirrusServers.get(cirrusKey);
+		if (cirrusServer) {
+			const port = cirrusServer.port;
+
+			// 2. Find and destroy the instance via its player port
+			if (instanceManagerEnabled && port) {
+				const info = instanceManager.findByPlayerPort(port);
+				if (info) {
+					logging.log(`Destroying instance ${info.instanceId.substring(0, 8)}... after session expiry (port ${port})`);
+					instanceManager.releaseInstance(info.instanceId);
+				} else {
+					logging.log(`No instance found for port ${port} — may already be cleaned up`);
+				}
 			}
+
+			// 3. Force disconnect the cirrus TCP connection
+			try {
+				cirrusKey.end();
+			} catch (e) { /* ignore */ }
+			cirrusServers.delete(cirrusKey);
+			logging.log(`Disconnected Cirrus server on port ${cirrusServer.port} after session expiry`);
+		} else {
+			// Cirrus server not found in map — try finding instance by connection key directly
+			if (instanceManagerEnabled) {
+				const info = instanceManager.findByConnectionKey(cirrusKey);
+				if (info) {
+					logging.log(`Destroying instance ${info.instanceId.substring(0, 8)}... after session expiry (via connection key)`);
+					instanceManager.releaseInstance(info.instanceId);
+				}
+			}
+			logging.log(`Cirrus server for expired session not found in map — may already be disconnected`);
 		}
 	});
 }
@@ -109,17 +145,22 @@ if (instanceManagerEnabled) {
 		// The instance is now ready — next time a queued user polls, they'll get redirected
 	};
 
-	// When an instance is destroyed, clean up any associated session
+	// When an instance is destroyed, clean up any associated session and cirrus entry
 	instanceManager.onInstanceDestroyed = (instanceId, instance) => {
-		// Remove from cirrusServers if still tracked
 		if (instance.connectionKey) {
+			// Remove from cirrusServers
 			cirrusServers.delete(instance.connectionKey);
+
+			// Destroy any session associated with this connection
+			if (sessionManagerEnabled) {
+				const session = sessionManager.findSessionByCirrusKey(instance.connectionKey);
+				if (session) {
+					sessionManager.destroySession(session.token);
+				}
+			}
 		}
 	};
 }
-
-// A list of all the Cirrus server which are connected to the Matchmaker.
-var cirrusServers = new Map();
 
 //
 // Parse command line.
@@ -232,6 +273,19 @@ function getConnectionKeyForServer(targetServer) {
 	return null;
 }
 
+/**
+ * Build the redirect URL with the ?ss= WebSocket parameter.
+ * @param {Object} cirrusServer - The cirrus server object
+ * @returns {{ pageUrl: string, logUrl: string }}
+ */
+function buildRedirectUrl(cirrusServer) {
+	const httpPrefix = cirrusServer.https ? 'https://' : 'http://';
+	const wsPrefix = cirrusServer.https ? 'wss' : 'ws';
+	const addr = `${cirrusServer.address}:${cirrusServer.port}`;
+	const pageUrl = `${httpPrefix}${addr}/?ss=${wsPrefix}://${addr}`;
+	return { pageUrl, logUrl: addr };
+}
+
 // ============================================================================
 // REST API Endpoints
 // ============================================================================
@@ -258,12 +312,19 @@ if (sessionManagerEnabled) {
 		if (!session) {
 			return res.status(404).json({ error: 'Session not found', expired: true });
 		}
+
+		// Include the redirect URL so the overlay/queue page can navigate back
+		const redirectUrl = session.cirrusAddress
+			? `${config.UseHTTPS ? 'https' : 'http'}://${session.cirrusAddress}/?ss=${config.UseHTTPS ? 'wss' : 'ws'}://${session.cirrusAddress}`
+			: null;
+
 		res.json({
 			timeRemainingSeconds: session.timeRemainingSeconds,
 			totalSeconds: session.totalSeconds,
 			expired: session.expired,
 			state: session.state,
-			warnBeforeEndSeconds: session.warnBeforeEndSeconds
+			warnBeforeEndSeconds: session.warnBeforeEndSeconds,
+			redirectUrl
 		});
 	});
 
@@ -273,13 +334,22 @@ if (sessionManagerEnabled) {
 		if (!token) {
 			return res.status(400).json({ error: 'No session token found' });
 		}
+
 		const session = sessionManager.getSession(token);
-		if (session && session.cirrusServerKey) {
+		if (session && session.cirrusServerKey && instanceManagerEnabled) {
+			// Find and release the instance
 			const cirrusServer = cirrusServers.get(session.cirrusServerKey);
-			if (cirrusServer && cirrusServer.instanceId && instanceManagerEnabled) {
-				instanceManager.releaseInstance(cirrusServer.instanceId);
+			if (cirrusServer) {
+				const info = instanceManager.findByPlayerPort(cirrusServer.port);
+				if (info) {
+					instanceManager.releaseInstance(info.instanceId);
+				}
+				// Disconnect cirrus
+				try { session.cirrusServerKey.end(); } catch (e) { /* ignore */ }
+				cirrusServers.delete(session.cirrusServerKey);
 			}
 		}
+
 		sessionManager.destroySession(token);
 		res.clearCookie(sessionManager.getCookieName());
 		res.json({ success: true });
@@ -323,10 +393,11 @@ if(enableRedirectionLinks) {
 				if (existingSession && !existingSession.expired) {
 					// Valid session exists — redirect back to the same instance
 					const prefix = config.UseHTTPS ? 'https://' : 'http://';
-					sessionManager.cancelGrace(sessionToken);
-					console.log(`Session reconnect: redirecting to ${existingSession.cirrusAddress}`);
 					const wsPrefix = config.UseHTTPS ? 'wss' : 'ws';
-				return res.redirect(`${prefix}${existingSession.cirrusAddress}/?ss=${wsPrefix}://${existingSession.cirrusAddress}`);
+					sessionManager.cancelGrace(sessionToken);
+					const addr = existingSession.cirrusAddress;
+					logging.log(`Session reconnect: redirecting to ${addr}`);
+					return res.redirect(`${prefix}${addr}/?ss=${wsPrefix}://${addr}`);
 				} else {
 					// Expired or invalid session — clear the cookie
 					res.clearCookie(sessionManager.getCookieName());
@@ -337,30 +408,35 @@ if(enableRedirectionLinks) {
 		// --- Normal flow: find available server ---
 		cirrusServer = getAvailableCirrusServer();
 		if (cirrusServer != undefined) {
-			let prefix = cirrusServer.https ? 'https://' : 'http://';
-
 			// Create session if session manager is enabled
 			if (sessionManagerEnabled) {
 				const connectionKey = getConnectionKeyForServer(cirrusServer);
 				const { token } = sessionManager.createSession(connectionKey, `${cirrusServer.address}:${cirrusServer.port}`);
+
+				// Set session cookie
 				res.cookie(sessionManager.getCookieName(), token, {
 					httpOnly: true,
 					sameSite: 'strict',
 					path: '/',
 					maxAge: config.SessionManager.sessionDurationSeconds * 1000
 				});
+
+				// Set matchmaker URL cookie so the overlay knows where to call the session API
+				res.cookie('ps_matchmaker', `${config.UseHTTPS ? 'https' : 'http'}://localhost:${config.HttpPort}`, {
+					path: '/',
+					maxAge: config.SessionManager.sessionDurationSeconds * 1000
+				});
 			}
 
-			const wsPrefix = cirrusServer.https ? 'wss' : 'ws';
-			res.redirect(`${prefix}${cirrusServer.address}:${cirrusServer.port}/`);
-			console.log(`Redirect to ${cirrusServer.address}:${cirrusServer.port}`);
+			// Redirect with ?ss= WebSocket URL parameter
+			const { pageUrl, logUrl } = buildRedirectUrl(cirrusServer);
+			res.redirect(pageUrl);
+			logging.log(`Redirect to ${logUrl}`);
 		} else if (instanceManagerEnabled) {
 			// No servers available — try spawning a new one
 			const newInstance = instanceManager.requestInstance();
 			if (newInstance) {
-				console.log(`Spawning new instance on ports player:${newInstance.playerPort} streamer:${newInstance.streamerPort}`);
-				// Instance is spawning — send queue page, user will auto-retry and get redirected
-				// when the instance registers with matchmaker and streamer connects
+				logging.log(`Spawning new instance on ports player:${newInstance.playerPort} streamer:${newInstance.streamerPort}`);
 				sendRetryResponse(res, {
 					queuePosition: 1,
 					queueLength: 0,
@@ -384,10 +460,9 @@ if(enableRedirectionLinks) {
 	app.get('/custom_html/:htmlFilename', (req, res) => {
 		cirrusServer = getAvailableCirrusServer();
 		if (cirrusServer != undefined) {
-			let prefix = cirrusServer.https ? 'https://' : 'http://';
-			const wsPrefix2 = cirrusServer.https ? 'wss' : 'ws';
-			res.redirect(`${prefix}${cirrusServer.address}:${cirrusServer.port}/custom_html/${req.params.htmlFilename}?ss=${wsPrefix2}://${cirrusServer.address}:${cirrusServer.port}`);
-			console.log(`Redirect to ${cirrusServer.address}:${cirrusServer.port}`);
+			const { pageUrl } = buildRedirectUrl(cirrusServer);
+			res.redirect(pageUrl.replace('/?', `/custom_html/${req.params.htmlFilename}?`));
+			logging.log(`Redirect to ${cirrusServer.address}:${cirrusServer.port}`);
 		} else {
 			sendRetryResponse(res);
 		}
