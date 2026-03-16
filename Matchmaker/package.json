@@ -1,0 +1,22 @@
+{
+    "name": "@epicgames-ps/cirrus-matchmaker",
+    "version": "0.0.2",
+    "private": true,
+    "description": "Cirrus servers connect to the Matchmaker which redirects a browser to the next available Cirrus server. Extended with dynamic instance management and session tracking.",
+    "scripts": {
+        "build": "echo No build needed for Matchmaker (plain JS)",
+        "start-local": "run-script-os --",
+        "start-local:windows": ".\\platform_scripts\\cmd\\run.bat",
+        "start-local:default": "./platform_scripts/bash/run.sh",
+        "start": "run-script-os",
+        "start:windows": "platform_scripts\\cmd\\node\\node.exe matchmaker.js",
+        "start:default": "if [ `id -u` -eq 0 ]\nthen\n export process=\"./platform_scripts/bash/node/bin/node matchmaker.js\"\nelse\n export process=\"sudo ./platform_scripts/bash/node/bin/node matchmaker.js\"\nfi\n$process "
+    },
+    "dependencies": {
+        "cookie-parser": "^1.4.6",
+        "cors": "^2.8.5",
+        "express": "^4.19.2",
+        "uuid": "^9.0.0",
+        "yargs": "17.3.1"
+    }
+}

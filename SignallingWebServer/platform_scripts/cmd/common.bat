@@ -34,7 +34,7 @@ echo        --build-wilbur      Force build of wilbur
 echo        --deps              Force reinstall of dependencies
 echo    Everything after -- is passed directly to the signalling server executable.
 IF exist "%SCRIPT_DIR%..\..\dist" (
-    pushd %SCRIPT_DIR%..\..
+    pushd "%SCRIPT_DIR%..\..\\"
     call %NPM% run start --- --help
     popd
 )
@@ -131,7 +131,7 @@ GOTO PostArgs
 exit /b
 
 :SetupNode
-pushd %SCRIPT_DIR%
+pushd "%SCRIPT_DIR%"
 SET NODE_NAME=node-%NODE_VERSION%-win-x64
 if exist node\ (
   echo Node directory found...skipping install.
@@ -159,7 +159,7 @@ popd
 
 if "%INSTALL_DEPS%"=="1" (
     echo Installing dependencies...
-    pushd %SCRIPT_DIR%..\..\..
+    pushd "%SCRIPT_DIR%..\..\..\"
     call %NPM% install
     popd
 )
@@ -182,14 +182,14 @@ if NOT exist "%SCRIPT_DIR%..\..\..\Signalling\dist" (
 )
 
 IF "%BUILD_COMMON%"=="1" (
-    pushd %SCRIPT_DIR%..\..\..\Common
+    pushd "%SCRIPT_DIR%..\..\..\Common"
     echo Building common library
     call %NPM% run build:cjs
     popd
 )
 
 IF "%BUILD_SIGNALLING%"=="1" (
-    pushd %SCRIPT_DIR%..\..\..\Signalling
+    pushd "%SCRIPT_DIR%..\..\..\Signalling"
     echo Building signalling library
     call %NPM% run build:cjs
     popd
@@ -199,7 +199,7 @@ exit /b
 
 :SetupFrontend
 rem Start in the repo dir
-pushd %SCRIPT_DIR%..\..\..\
+pushd "%SCRIPT_DIR%..\..\..\"
 
 IF "%FRONTEND_DIR%"=="" (
     set FRONTEND_DIR="%SCRIPT_DIR%..\..\www"
@@ -245,7 +245,7 @@ exit /b
 
 :SetupCoturn
 @Rem Look for CoTURN directory next to this script
-pushd %SCRIPT_DIR%
+pushd "%SCRIPT_DIR%"
 if exist coturn\ (
   echo CoTURN directory found...skipping install.
 ) else (
@@ -303,7 +303,7 @@ if "%START_TURN%"=="1" (
     IF NOT "%TURN_SERVER%"=="" (
         IF NOT "%TURN_USER%"=="" (
             IF NOT "%TURN_PASS%"=="" (
-                pushd %SCRIPT_DIR%coturn\
+                pushd "%SCRIPT_DIR%coturn\"
                 IF "%1"=="bg" (
                     start "%TURN_PROCESS%" %TURN_PROCESS% %TURN_ARGS%
                 ) else (
@@ -332,7 +332,7 @@ IF NOT exist "%SCRIPT_DIR%..\..\dist" (
 )
 
 IF "%BUILD_WILBUR%"=="1" (
-    pushd %SCRIPT_DIR%\..\..\
+    pushd "%SCRIPT_DIR%\..\..\\"
     echo Building wilbur...
     call %NPM% run build
     popd
@@ -340,7 +340,7 @@ IF "%BUILD_WILBUR%"=="1" (
 exit /b
 
 :StartWilbur
-pushd %SCRIPT_DIR%\..\..\
+pushd "%SCRIPT_DIR%\..\..\\"
 call %NPM% run start -- %SERVER_ARGS%
 exit /b
 

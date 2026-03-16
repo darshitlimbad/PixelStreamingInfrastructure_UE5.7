@@ -1,0 +1,53 @@
+{
+    "HttpPort": 90,
+    "UseHTTPS": false,
+    "MatchmakerPort": 9999,
+    "LogToFile": true,
+    "EnableWebserver": true,
+    "InstanceManager": {
+        "enabled": true,
+        "signallingServerDir": "../SignallingWebServer",
+        "stun": "stun.l.google.com:19302",
+        "turn": "",
+        "turnUser": "",
+        "turnPass": "",
+        "signallingServerArgs": [
+            "--serve",
+            "--console_messages",
+            "verbose",
+            "--log_config",
+            "--http_root",
+            "../SignallingWebServer/www"
+        ],
+        "ueAppPath": "C:/UEProjects/Unreal Engine/__LEARNING__/ArchvizExplorer/LaunchGame.bat",
+        "ueAppArgs": [
+            "-RenderOffScreen",
+            "-ResX=1920",
+            "-ResY=1080",
+            "-AudioMixer",
+            "-ForceRes",
+            "-log",
+            "-game"
+        ],
+        "publicIp": "localhost",
+        "playerPortRange": {
+            "start": 81,
+            "end": 100
+        },
+        "streamerPortRange": {
+            "start": 8890,
+            "end": 8920
+        },
+        "minInstances": 0,
+        "maxInstances": 3,
+        "instanceBootTimeoutSeconds": 30,
+        "instanceIdleTimeoutSeconds": 60
+    },
+    "SessionManager": {
+        "enabled": true,
+        "sessionDurationSeconds": 600,
+        "sessionWarnBeforeEndSeconds": 60,
+        "reconnectGraceSeconds": 30,
+        "cookieName": "ps_session"
+    }
+}

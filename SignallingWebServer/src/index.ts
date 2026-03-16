@@ -11,6 +11,7 @@ import {
     IWebServerConfig
 } from '@epicgames-ps/lib-pixelstreamingsignalling-ue5.7';
 import { beautify, IProgramOptions } from './Utils';
+import { MatchmakerConnection } from './modules/MatchmakerConnection';
 import { initInputHandler } from './InputHandler';
 import { Command, Option } from 'commander';
 import { initialize } from 'express-openapi';
@@ -173,6 +174,26 @@ program
     )
     .option('--stdin', 'Allows stdin input while running.', config_file.stdin || false)
     .option(
+        '--use_matchmaker',
+        'Connect to a matchmaker server for load balancing.',
+        config_file.use_matchmaker || false
+    )
+    .option(
+        '--matchmaker_address <address>',
+        'The address of the matchmaker server.',
+        config_file.matchmaker_address || '127.0.0.1'
+    )
+    .option(
+        '--matchmaker_port <port>',
+        'The port of the matchmaker server.',
+        config_file.matchmaker_port || '9999'
+    )
+    .option(
+        '--public_ip <address>',
+        'The public IP address the matchmaker will use to redirect clients to this server.',
+        config_file.public_ip || '127.0.0.1'
+    )
+    .option(
         '--save',
         'After arguments are parsed the config.json is saved with whatever arguments were specified at launch.',
         config_file.save || false
@@ -269,6 +290,18 @@ if (options.serve) {
 }
 
 const signallingServer = new SignallingServer(serverOpts);
+
+if (options.use_matchmaker) {
+    new MatchmakerConnection(signallingServer, {
+        matchmakerAddress: options.matchmaker_address,
+        matchmakerPort: parseInt(options.matchmaker_port),
+        publicIp: options.public_ip,
+        playerPort: parseInt(options.player_port),
+        useHttps: !!options.https,
+        retryInterval: 5000,
+        pingInterval: 30000
+    });
+}
 
 if (options.stdin) {
     initInputHandler(options, signallingServer);

@@ -11,3 +11,5 @@ coverage/
 common/types/*
 .nx/cache
 .nx/workspace-data
+
+.claude
