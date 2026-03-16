@@ -5,8 +5,8 @@
 @Rem Set script location as working directory for commands.
 pushd "%~dp0"
 
-@Rem Name and version of node that we are downloading
-SET NodeVersion=v18.17.0
+@Rem Read node version from NODE_VERSION file
+SET /p NodeVersion=<"%~dp0..\..\..\NODE_VERSION"
 SET NodeName=node-%NodeVersion%-win-x64
 
 @Rem Look for a node directory next to this script

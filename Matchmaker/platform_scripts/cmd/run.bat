@@ -13,7 +13,7 @@ call setup.bat
 @Rem Move to matchmaker.js directory.
 pushd ..\..
 
-@Rem Prefer system Node if available (requires >=18.18.0), fall back to bundled.
+@Rem Prefer system Node if available, fall back to bundled.
 where node >nul 2>&1
 if %errorlevel% equ 0 (
     echo Using system Node:
