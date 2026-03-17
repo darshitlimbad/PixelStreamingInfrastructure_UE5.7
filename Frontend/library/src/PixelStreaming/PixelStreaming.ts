@@ -158,9 +158,9 @@ export class PixelStreaming {
             this._tryInitiateHandshake();
         });
 
-        // Register handler for messages from UE streamer (uses requestedDeviceInfo protocol)
+        // Register handler for device management messages from UE (pong, ping, device info requests)
         this.registerMessageHandler(
-            'requestedDeviceInfo',
+            'archviz_deviceControl',
             MessageDirection.FromStreamer,
             (data: ArrayBuffer) => {
                 try {
@@ -182,14 +182,30 @@ export class PixelStreaming {
                             originalTimestamp: message.timestamp || 0,
                             timestamp: Date.now()
                         });
-                    } else if (type === 'requestedDeviceInfo') {
+                    } else if (type === 'requestDeviceInfo') {
                         Logger.Info('UE requested device info');
                         this.handleDeviceInfoRequest(message);
                     } else {
-                        Logger.Info('Received streamer message: ' + type);
+                        Logger.Info('Received deviceControl message: ' + type);
                     }
                 } catch (error) {
-                    Logger.Warning('Error parsing streamer message: ' + error);
+                    Logger.Warning('Error parsing deviceControl message: ' + error);
+                }
+            }
+        );
+
+        // Register handler for application command messages from UE (UI updates, state sync, etc.)
+        this.registerMessageHandler(
+            'archviz_appCommand',
+            MessageDirection.FromStreamer,
+            (data: ArrayBuffer) => {
+                try {
+                    const decoder = new TextDecoder('utf-16');
+                    const jsonStr = decoder.decode(data.slice(1));
+                    Logger.Info('Received appCommand: ' + jsonStr);
+                    // Future: dispatch custom app-level events here
+                } catch (error) {
+                    Logger.Warning('Error parsing appCommand message: ' + error);
                 }
             }
         );
@@ -247,7 +263,7 @@ export class PixelStreaming {
     public handleDeviceInfoRequest(_message: any) {
         this._eventEmitter.dispatchEvent(
             new DeviceInfoRequestedEvent({
-                message: { type: 'requestedDeviceInfo', timestamp: Date.now() }
+                message: { type: 'requestDeviceInfo', timestamp: Date.now() }
             })
         );
         this.sendDeviceInfo();
