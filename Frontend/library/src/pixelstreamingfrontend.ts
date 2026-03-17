@@ -23,4 +23,5 @@ export { OutboundRTPStats, RemoteOutboundRTPStats } from './PeerConnectionContro
 export * from './PeerConnectionController/LatencyCalculator';
 export * from './DataChannel/DataChannelLatencyTestResults';
 export * from './Util/EventEmitter';
+export * from './Util/DeviceDetector';
 export * from '@epicgames-ps/lib-pixelstreamingcommon-ue5.7';

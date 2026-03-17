@@ -13,6 +13,7 @@ import {
     DataChannelLatencyTestResponse,
     DataChannelLatencyTestResult
 } from '../DataChannel/DataChannelLatencyTestResults';
+import { DeviceInfo } from './DeviceDetector';
 
 /**
  * An event that is emitted when AFK disconnect is about to happen.
@@ -616,6 +617,91 @@ export class WebRtcTCPRelayDetectedEvent extends Event {
     }
 }
 
+// Device-related custom events for Pixel Streaming
+
+export class DeviceInfoSentEvent extends Event {
+    override readonly type: 'deviceInfoSent';
+    readonly data: {
+        deviceInfo: DeviceInfo;
+    };
+    constructor(data: DeviceInfoSentEvent['data']) {
+        super('deviceInfoSent');
+        this.data = data;
+    }
+}
+
+export class DeviceInfoRequestedEvent extends Event {
+    override readonly type: 'deviceInfoRequested';
+    readonly data: {
+        message: { type: string; timestamp?: number };
+    };
+    constructor(data: DeviceInfoRequestedEvent['data']) {
+        super('deviceInfoRequested');
+        this.data = data;
+    }
+}
+
+export class MobileDeviceDetectedEvent extends Event {
+    override readonly type: 'mobileDeviceDetected';
+    readonly data: {
+        deviceInfo: DeviceInfo;
+    };
+    constructor(data: MobileDeviceDetectedEvent['data']) {
+        super('mobileDeviceDetected');
+        this.data = data;
+    }
+}
+
+export class DesktopDeviceDetectedEvent extends Event {
+    override readonly type: 'desktopDeviceDetected';
+    readonly data: {
+        deviceInfo: DeviceInfo;
+    };
+    constructor(data: DesktopDeviceDetectedEvent['data']) {
+        super('desktopDeviceDetected');
+        this.data = data;
+    }
+}
+
+export class DeviceOrientationChangedEvent extends Event {
+    override readonly type: 'deviceOrientationChanged';
+    readonly data: {
+        orientationData: {
+            type: string;
+            data: { orientation: string; width: number; height: number; angle: number };
+        };
+    };
+    constructor(data: DeviceOrientationChangedEvent['data']) {
+        super('deviceOrientationChanged');
+        this.data = data;
+    }
+}
+
+export class DevicePingEvent extends Event {
+    override readonly type: 'devicePing';
+    readonly data: {
+        direction: 'sent' | 'received';
+        timestamp: number;
+    };
+    constructor(data: DevicePingEvent['data']) {
+        super('devicePing');
+        this.data = data;
+    }
+}
+
+export class DevicePongReceivedEvent extends Event {
+    override readonly type: 'devicePongReceived';
+    readonly data: {
+        roundTripMs: number;
+        originalTimestamp: number;
+        serverTimestamp: number;
+    };
+    constructor(data: DevicePongReceivedEvent['data']) {
+        super('devicePongReceived');
+        this.data = data;
+    }
+}
+
 export type PixelStreamingEvent =
     | AfkWarningActivateEvent
     | AfkWarningUpdateEvent
@@ -658,7 +744,14 @@ export type PixelStreamingEvent =
     | XrSessionEndedEvent
     | XrFrameEvent
     | PlayerCountEvent
-    | WebRtcTCPRelayDetectedEvent;
+    | WebRtcTCPRelayDetectedEvent
+    | DeviceInfoSentEvent
+    | DeviceInfoRequestedEvent
+    | MobileDeviceDetectedEvent
+    | DesktopDeviceDetectedEvent
+    | DeviceOrientationChangedEvent
+    | DevicePingEvent
+    | DevicePongReceivedEvent;
 
 export class PixelStreamingEventEmitter extends EventTarget {
     /**

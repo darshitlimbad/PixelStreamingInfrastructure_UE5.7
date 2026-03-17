@@ -32,8 +32,16 @@ import {
     WebRtcTCPRelayDetectedEvent,
     SubscribeFailedEvent,
     WebRtcSdpOfferEvent,
-    WebRtcSdpAnswerEvent
+    WebRtcSdpAnswerEvent,
+    DeviceInfoSentEvent,
+    DeviceInfoRequestedEvent,
+    MobileDeviceDetectedEvent,
+    DesktopDeviceDetectedEvent,
+    DeviceOrientationChangedEvent,
+    DevicePingEvent,
+    DevicePongReceivedEvent
 } from '../Util/EventEmitter';
+import { DeviceDetector, DeviceInfo } from '../Util/DeviceDetector';
 import { WebXRController } from '../WebXR/WebXRController';
 import { MessageDirection } from '../UeInstanceMessage/StreamMessageController';
 import {
@@ -82,6 +90,14 @@ export class PixelStreaming {
 
     private _eventEmitter: PixelStreamingEventEmitter;
 
+    private deviceInfo: DeviceInfo | null = null;
+    private deviceInfoSent: boolean = false;
+    private orientationHandler: ((event: Event) => void) | null = null;
+    private orientationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    private _dataChannelReady = false;
+    private _videoReady = false;
+    private _pingPongVerified = false;
+
     /**
      * @param config - A newly instantiated config object
      * @param overrides - Parameters to override default behaviour
@@ -101,6 +117,9 @@ export class PixelStreaming {
         // setup WebRTC
         this.setWebRtcPlayerController(new WebRtcPlayerController(this.config, this));
 
+        // Setup device detection
+        this.setupDeviceDetection();
+
         this._webXrController = new WebXRController(this._webRtcController);
 
         this._setupWebRtcTCPRelayDetection = this._setupWebRtcTCPRelayDetection.bind(this);
@@ -110,6 +129,210 @@ export class PixelStreaming {
             // Bind to the stats received event
             this._eventEmitter.addEventListener('statsReceived', this._setupWebRtcTCPRelayDetection);
         });
+    }
+
+    /**
+     * Sets up device detection: orientation listeners, dual-condition gate,
+     * ping-pong handshake, and UE message handlers.
+     */
+    private setupDeviceDetection(): void {
+        // Orientation change detection with debounce
+        this.orientationHandler = () => {
+            if (this.orientationDebounceTimer) {
+                clearTimeout(this.orientationDebounceTimer);
+            }
+            this.orientationDebounceTimer = setTimeout(() => {
+                this.handleOrientationChange();
+            }, 300);
+        };
+        window.addEventListener('orientationchange', this.orientationHandler);
+        window.addEventListener('resize', this.orientationHandler);
+
+        // Dual-condition gate: wait for both dataChannel + video before initiating handshake
+        this._eventEmitter.addEventListener('dataChannelOpen', () => {
+            this._dataChannelReady = true;
+            this._tryInitiateHandshake();
+        });
+        this._eventEmitter.addEventListener('videoInitialized', () => {
+            this._videoReady = true;
+            this._tryInitiateHandshake();
+        });
+
+        // Register handler for messages from UE streamer (uses requestedDeviceInfo protocol)
+        this.registerMessageHandler(
+            'requestedDeviceInfo',
+            MessageDirection.FromStreamer,
+            (data: ArrayBuffer) => {
+                try {
+                    const decoder = new TextDecoder('utf-16');
+                    const jsonStr = decoder.decode(data.slice(1));
+                    const message = JSON.parse(jsonStr);
+                    const type = message.type;
+
+                    if (type === 'devicePong') {
+                        this._handleDevicePong(message);
+                    } else if (type === 'devicePing') {
+                        // UE initiated a ping — auto-reply with pong
+                        Logger.Info('Received devicePing from UE, sending pong');
+                        this._eventEmitter.dispatchEvent(
+                            new DevicePingEvent({ direction: 'received', timestamp: Date.now() })
+                        );
+                        this.emitUIInteraction({
+                            type: 'devicePong',
+                            originalTimestamp: message.timestamp || 0,
+                            timestamp: Date.now()
+                        });
+                    } else if (type === 'requestedDeviceInfo') {
+                        Logger.Info('UE requested device info');
+                        this.handleDeviceInfoRequest(message);
+                    } else {
+                        Logger.Info('Received streamer message: ' + type);
+                    }
+                } catch (error) {
+                    Logger.Warning('Error parsing streamer message: ' + error);
+                }
+            }
+        );
+    }
+
+    /**
+     * Attempts to start the ping-pong handshake once both data channel and video are ready.
+     */
+    private _tryInitiateHandshake(): void {
+        if (this._dataChannelReady && this._videoReady && !this._pingPongVerified) {
+            this.sendDevicePing();
+        }
+    }
+
+    /**
+     * Sends a ping to UE to verify bidirectional communication.
+     */
+    public sendDevicePing(): void {
+        const timestamp = Date.now();
+        const success = this.emitUIInteraction({ type: 'devicePing', timestamp });
+
+        if (success) {
+            Logger.Info('Sent devicePing to UE');
+            this._eventEmitter.dispatchEvent(new DevicePingEvent({ direction: 'sent', timestamp }));
+        } else {
+            Logger.Warning('Failed to send devicePing - connection not ready');
+        }
+    }
+
+    /**
+     * Handles pong response from UE. Marks channel as verified and sends device info.
+     */
+    private _handleDevicePong(message: any): void {
+        const now = Date.now();
+        const originalTimestamp = message.originalTimestamp || 0;
+        const serverTimestamp = message.serverTimestamp || 0;
+        const roundTripMs = now - originalTimestamp;
+
+        this._pingPongVerified = true;
+        Logger.Info(`Ping-pong verified. RTT: ${roundTripMs}ms`);
+
+        this._eventEmitter.dispatchEvent(
+            new DevicePongReceivedEvent({ roundTripMs, originalTimestamp, serverTimestamp })
+        );
+
+        // Now that bidirectional communication is confirmed, send device info
+        if (!this.deviceInfoSent) {
+            this.sendDeviceInfo();
+        }
+    }
+
+    /**
+     * Handles a device info request from UE, dispatches event, and sends device info back.
+     */
+    public handleDeviceInfoRequest(_message: any) {
+        this._eventEmitter.dispatchEvent(
+            new DeviceInfoRequestedEvent({
+                message: { type: 'requestedDeviceInfo', timestamp: Date.now() }
+            })
+        );
+        this.sendDeviceInfo();
+    }
+
+    /**
+     * Sends device information to Unreal Engine via emitUIInteraction.
+     */
+    public sendDeviceInfo(): void {
+        const deviceInfo = DeviceDetector.getDeviceInfo();
+        this.deviceInfo = deviceInfo;
+
+        const deviceMessage = {
+            type: 'deviceInfo',
+            data: deviceInfo
+        };
+
+        const success = this.emitUIInteraction(deviceMessage);
+
+        if (success) {
+            this.deviceInfoSent = true;
+            Logger.Info('Sent device info to UE');
+
+            this._eventEmitter.dispatchEvent(new DeviceInfoSentEvent({ deviceInfo }));
+
+            if (deviceInfo.isMobile || deviceInfo.isTablet) {
+                this._eventEmitter.dispatchEvent(new MobileDeviceDetectedEvent({ deviceInfo }));
+            } else {
+                this._eventEmitter.dispatchEvent(new DesktopDeviceDetectedEvent({ deviceInfo }));
+            }
+        } else {
+            Logger.Warning('Failed to send device info - connection not ready');
+        }
+    }
+
+    /**
+     * Returns the current device information, or null if not yet collected.
+     */
+    public getDeviceInfo(): DeviceInfo | null {
+        return this.deviceInfo;
+    }
+
+    /**
+     * Returns whether device info has been successfully sent to UE.
+     */
+    public hasDeviceInfoBeenSent(): boolean {
+        return this.deviceInfoSent;
+    }
+
+    private handleOrientationChange(): void {
+        if (!this.deviceInfo) return;
+
+        const orientationMessage = {
+            type: 'orientationChange',
+            data: {
+                orientation: this.getOrientation(),
+                width: window.innerWidth,
+                height: window.innerHeight,
+                angle: this.getOrientationAngle(),
+                timestamp: Date.now()
+            }
+        };
+
+        this.emitUIInteraction(orientationMessage);
+
+        this._eventEmitter.dispatchEvent(
+            new DeviceOrientationChangedEvent({
+                orientationData: {
+                    type: 'orientationChange',
+                    data: orientationMessage.data
+                }
+            })
+        );
+    }
+
+    private getOrientation(): string {
+        if (screen.orientation) {
+            return screen.orientation.type;
+        }
+        const angle = this.getOrientationAngle();
+        return angle === 0 || angle === 180 ? 'portrait' : 'landscape';
+    }
+
+    private getOrientationAngle(): number {
+        return screen.orientation ? screen.orientation.angle : (window as any).orientation || 0;
     }
 
     /**
@@ -314,6 +537,22 @@ export class PixelStreaming {
     public disconnect() {
         this._eventEmitter.dispatchEvent(new StreamPreDisconnectEvent());
         this._webRtcController.close();
+
+        // Reset device detection state for potential reconnect
+        this._dataChannelReady = false;
+        this._videoReady = false;
+        this._pingPongVerified = false;
+        this.deviceInfoSent = false;
+
+        if (this.orientationHandler) {
+            window.removeEventListener('orientationchange', this.orientationHandler);
+            window.removeEventListener('resize', this.orientationHandler);
+            this.orientationHandler = null;
+        }
+        if (this.orientationDebounceTimer) {
+            clearTimeout(this.orientationDebounceTimer);
+            this.orientationDebounceTimer = null;
+        }
     }
 
     /**

@@ -20,7 +20,7 @@
 	"log_config": true,
 	"stdin": false,
 	"console_messages": "verbose",
-	"use_matchmaker": true,
+	"use_matchmaker": false,
 	"matchmaker_address": "127.0.0.1",
 	"matchmaker_port": "9999",
 	"public_ip": "127.0.0.1"
