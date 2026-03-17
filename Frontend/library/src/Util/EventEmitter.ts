@@ -702,6 +702,20 @@ export class DevicePongReceivedEvent extends Event {
     }
 }
 
+export class HandshakeTimeoutEvent extends Event {
+    override readonly type: 'handshakeTimeout';
+    readonly data: {
+        /** Total number of ping attempts made before giving up. */
+        attempts: number;
+        /** Total elapsed time in milliseconds from first ping to timeout. */
+        elapsedMs: number;
+    };
+    constructor(data: HandshakeTimeoutEvent['data']) {
+        super('handshakeTimeout');
+        this.data = data;
+    }
+}
+
 export type PixelStreamingEvent =
     | AfkWarningActivateEvent
     | AfkWarningUpdateEvent
@@ -751,7 +765,8 @@ export type PixelStreamingEvent =
     | DesktopDeviceDetectedEvent
     | DeviceOrientationChangedEvent
     | DevicePingEvent
-    | DevicePongReceivedEvent;
+    | DevicePongReceivedEvent
+    | HandshakeTimeoutEvent;
 
 export class PixelStreamingEventEmitter extends EventTarget {
     /**

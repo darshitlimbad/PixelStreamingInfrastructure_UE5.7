@@ -39,7 +39,8 @@ import {
     DesktopDeviceDetectedEvent,
     DeviceOrientationChangedEvent,
     DevicePingEvent,
-    DevicePongReceivedEvent
+    DevicePongReceivedEvent,
+    HandshakeTimeoutEvent
 } from '../Util/EventEmitter';
 import { DeviceDetector, DeviceInfo } from '../Util/DeviceDetector';
 import { WebXRController } from '../WebXR/WebXRController';
@@ -97,6 +98,13 @@ export class PixelStreaming {
     private _dataChannelReady = false;
     private _videoReady = false;
     private _pingPongVerified = false;
+
+    // Ping retry state: fixed 4s interval, give up after ~120s
+    private static readonly PING_RETRY_INTERVAL_MS = 4000;
+    private static readonly PING_TIMEOUT_MS = 120000;
+    private _pingRetryTimer: ReturnType<typeof setInterval> | null = null;
+    private _pingAttemptCount = 0;
+    private _pingStartTime = 0;
 
     /**
      * @param config - A newly instantiated config object
@@ -213,10 +221,66 @@ export class PixelStreaming {
 
     /**
      * Attempts to start the ping-pong handshake once both data channel and video are ready.
+     * Sends an initial ping immediately, then retries every 4s until pong is received
+     * or ~120s have elapsed (at which point a handshakeTimeout event is dispatched).
      */
     private _tryInitiateHandshake(): void {
-        if (this._dataChannelReady && this._videoReady && !this._pingPongVerified) {
-            this.sendDevicePing();
+        if (!this._dataChannelReady || !this._videoReady || this._pingPongVerified) {
+            return;
+        }
+
+        // Send the first ping immediately
+        this._pingAttemptCount = 0;
+        this._pingStartTime = Date.now();
+        this._sendPingAttempt();
+
+        // Start the retry interval
+        if (this._pingRetryTimer) {
+            clearInterval(this._pingRetryTimer);
+        }
+        this._pingRetryTimer = setInterval(() => {
+            // Stop if pong was received
+            if (this._pingPongVerified) {
+                this._clearPingRetry();
+                return;
+            }
+
+            // Check timeout (~120s)
+            const elapsed = Date.now() - this._pingStartTime;
+            if (elapsed >= PixelStreaming.PING_TIMEOUT_MS) {
+                Logger.Error(
+                    `Handshake timeout: no pong received after ${this._pingAttemptCount} attempts (${Math.round(elapsed / 1000)}s). Giving up.`
+                );
+                this._clearPingRetry();
+                this._eventEmitter.dispatchEvent(
+                    new HandshakeTimeoutEvent({
+                        attempts: this._pingAttemptCount,
+                        elapsedMs: elapsed
+                    })
+                );
+                return;
+            }
+
+            // Send another ping
+            this._sendPingAttempt();
+        }, PixelStreaming.PING_RETRY_INTERVAL_MS);
+    }
+
+    /**
+     * Sends a single ping attempt and increments the attempt counter.
+     */
+    private _sendPingAttempt(): void {
+        this._pingAttemptCount++;
+        this.sendDevicePing();
+    }
+
+    /**
+     * Clears the ping retry interval timer.
+     */
+    private _clearPingRetry(): void {
+        if (this._pingRetryTimer) {
+            clearInterval(this._pingRetryTimer);
+            this._pingRetryTimer = null;
         }
     }
 
@@ -228,7 +292,7 @@ export class PixelStreaming {
         const success = this.emitUIInteraction({ type: 'devicePing', timestamp });
 
         if (success) {
-            Logger.Info('Sent devicePing to UE');
+            Logger.Info(`Sent devicePing to UE (attempt ${this._pingAttemptCount})`);
             this._eventEmitter.dispatchEvent(new DevicePingEvent({ direction: 'sent', timestamp }));
         } else {
             Logger.Warning('Failed to send devicePing - connection not ready');
@@ -236,7 +300,7 @@ export class PixelStreaming {
     }
 
     /**
-     * Handles pong response from UE. Marks channel as verified and sends device info.
+     * Handles pong response from UE. Stops retry loop, marks channel as verified, sends device info.
      */
     private _handleDevicePong(message: any): void {
         const now = Date.now();
@@ -245,7 +309,8 @@ export class PixelStreaming {
         const roundTripMs = now - originalTimestamp;
 
         this._pingPongVerified = true;
-        Logger.Info(`Ping-pong verified. RTT: ${roundTripMs}ms`);
+        this._clearPingRetry();
+        Logger.Info(`Ping-pong verified after ${this._pingAttemptCount} attempt(s). RTT: ${roundTripMs}ms`);
 
         this._eventEmitter.dispatchEvent(
             new DevicePongReceivedEvent({ roundTripMs, originalTimestamp, serverTimestamp })
@@ -559,6 +624,8 @@ export class PixelStreaming {
         this._videoReady = false;
         this._pingPongVerified = false;
         this.deviceInfoSent = false;
+        this._pingAttemptCount = 0;
+        this._clearPingRetry();
 
         if (this.orientationHandler) {
             window.removeEventListener('orientationchange', this.orientationHandler);
