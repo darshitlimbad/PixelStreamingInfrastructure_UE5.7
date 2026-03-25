@@ -81,4 +81,7 @@ function attachDeviceEventLoggers(stream: PixelStreaming): void {
     stream.addEventListener('webRtcDisconnected', () =>
         console.log('webRtcDisconnected')
     );
+
+
+    // Config updates listener
 }

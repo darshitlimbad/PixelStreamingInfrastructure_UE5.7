@@ -210,7 +210,15 @@ export class PixelStreaming {
                 try {
                     const decoder = new TextDecoder('utf-16');
                     const jsonStr = decoder.decode(data.slice(1));
-                    Logger.Info('Received appCommand: ' + jsonStr);
+                    const parsed = JSON.parse(jsonStr);
+
+                    // Toggle Config Flags
+                    // Message Value Ex.: {"command":"ConfigFlagChanged","flag":"Flag_Name","value":Value}
+                    if (parsed.command === 'ConfigFlagChanged') {
+                        Logger.Info(`Config Value Change request received: ${parsed}`);
+                        this.config.setFlagEnabled(parsed.flag, parsed.value);
+                    }
+
                     // Future: dispatch custom app-level events here
                 } catch (error) {
                     Logger.Warning('Error parsing appCommand message: ' + error);
@@ -289,11 +297,13 @@ export class PixelStreaming {
      */
     public sendDevicePing(): void {
         const timestamp = Date.now();
-        const success = this.emitUIInteraction({ type: 'devicePing', timestamp });
+        const success = this.emitUIInteraction({ type: 'devicePing', timestamp: timestamp });
 
         if (success) {
             Logger.Info(`Sent devicePing to UE (attempt ${this._pingAttemptCount})`);
-            this._eventEmitter.dispatchEvent(new DevicePingEvent({ direction: 'sent', timestamp }));
+            this._eventEmitter.dispatchEvent(
+                new DevicePingEvent({ direction: 'sent', timestamp: timestamp })
+            );
         } else {
             Logger.Warning('Failed to send devicePing - connection not ready');
         }

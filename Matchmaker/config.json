@@ -19,7 +19,7 @@
             "--http_root",
             "../SignallingWebServer/www"
         ],
-        "ueAppPath": "C:/UEProjects/Unreal Engine/__LEARNING__/ArchvizExplorer/LaunchGame.bat",
+        "ueAppPath": "C:/UEProjects/Unreal Engine/__LEARNING__/ArchViz Explore v2.1/ArchViz_Explore_UDS/LaunchGame.bat",
         "ueAppArgs": [
             "-RenderOffScreen",
             "-ResX=1920",
@@ -29,7 +29,7 @@
             "-log",
             "-game"
         ],
-        "publicIp": "192.168.1.34",
+        "publicIp": "10.80.42.74",
         "playerPortRange": {
             "start": 81,
             "end": 100
@@ -39,7 +39,7 @@
             "end": 8920
         },
         "minInstances": 0,
-        "maxInstances": 3,
+        "maxInstances": 10,
         "instanceBootTimeoutSeconds": 30,
         "instanceIdleTimeoutSeconds": 60
     },
