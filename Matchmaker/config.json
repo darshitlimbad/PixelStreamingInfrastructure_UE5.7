@@ -1,5 +1,5 @@
 {
-    "HttpPort": 90,
+    "HttpPort": 80,
     "UseHTTPS": false,
     "MatchmakerPort": 9999,
     "LogToFile": true,
@@ -19,7 +19,7 @@
             "--http_root",
             "../SignallingWebServer/www"
         ],
-        "ueAppPath": "C:/UEProjects/Unreal Engine/__LEARNING__/ArchViz Explore v2.1/ArchViz_Explore_UDS/LaunchGame.bat",
+        "ueAppPath": "C:/UEProjects/Unreal Engine/__LEARNING__/ArchvizExplorer/LaunchGame.bat",
         "ueAppArgs": [
             "-RenderOffScreen",
             "-ResX=1920",
@@ -29,7 +29,7 @@
             "-log",
             "-game"
         ],
-        "publicIp": "10.80.42.74",
+        "publicIp": "192.168.1.24",
         "playerPortRange": {
             "start": 81,
             "end": 100
@@ -49,5 +49,9 @@
         "sessionWarnBeforeEndSeconds": 60,
         "reconnectGraceSeconds": 30,
         "cookieName": "ps_session"
+    },
+    "ReverseProxy": {
+        "enabled": true,
+        "proxyTimeout": 30000
     }
 }

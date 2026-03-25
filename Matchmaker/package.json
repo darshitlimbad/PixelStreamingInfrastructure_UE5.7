@@ -16,6 +16,7 @@
         "cookie-parser": "^1.4.6",
         "cors": "^2.8.5",
         "express": "^4.19.2",
+        "http-proxy": "^1.18.1",
         "uuid": "^9.0.0",
         "yargs": "17.3.1"
     }

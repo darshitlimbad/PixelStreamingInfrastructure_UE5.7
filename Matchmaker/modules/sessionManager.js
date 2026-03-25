@@ -47,9 +47,10 @@ class SessionManager {
      * Create a new session tied to a specific Cirrus server connection key.
      * @param {*} cirrusServerKey - The key identifying the Cirrus server in the cirrusServers Map
      * @param {string} cirrusAddress - The address:port of the assigned Cirrus server
+     * @param {number} playerPort - Internal port of the Wilbur instance for reverse proxying
      * @returns {{ token: string, expiresAt: number }}
      */
-    createSession(cirrusServerKey, cirrusAddress) {
+    createSession(cirrusServerKey, cirrusAddress, playerPort) {
         const token = crypto.randomUUID();
         const now = Date.now();
         const expiresAt = now + (this.config.sessionDurationSeconds * 1000);
@@ -58,9 +59,10 @@ class SessionManager {
             token,
             cirrusServerKey,
             cirrusAddress,
+            playerPort: playerPort || null,
             createdAt: now,
             expiresAt,
-            state: 'active',     // 'active', 'grace', 'expired'
+            state: 'active',     // 'preparing', 'active', 'grace', 'expired'
             graceTimer: null,
             expiryTimer: null
         };
@@ -71,9 +73,98 @@ class SessionManager {
         }, this.config.sessionDurationSeconds * 1000);
 
         this.sessions.set(token, session);
-        logging.log(`SessionManager: Created session ${token.substring(0, 8)}... for ${cirrusAddress} (expires in ${this.config.sessionDurationSeconds}s)`);
+        logging.log(`SessionManager: Created session ${token.substring(0, 8)}... for ${cirrusAddress} port:${playerPort} (expires in ${this.config.sessionDurationSeconds}s)`);
 
         return { token, expiresAt };
+    }
+
+    /**
+     * Create a session in 'preparing' state for an instance that is still booting.
+     * The expiry timer does NOT start until transitionToActive() is called.
+     * @param {number} playerPort - Internal port of the Wilbur instance being spawned
+     * @returns {{ token: string }}
+     */
+    createPreparingSession(playerPort) {
+        const token = crypto.randomUUID();
+        const now = Date.now();
+
+        const session = {
+            token,
+            cirrusServerKey: null,
+            cirrusAddress: null,
+            playerPort,
+            createdAt: now,
+            expiresAt: null,         // Set when transitioning to active
+            state: 'preparing',      // Instance is still booting
+            graceTimer: null,
+            expiryTimer: null
+        };
+
+        this.sessions.set(token, session);
+        logging.log(`SessionManager: Created preparing session ${token.substring(0, 8)}... for port:${playerPort} (timer deferred until active)`);
+
+        return { token };
+    }
+
+    /**
+     * Transition a session from 'preparing' to 'active'.
+     * This is called when the instance finishes booting and is ready.
+     * The session expiry timer starts now.
+     * @param {string} token - The session token
+     * @param {*} cirrusServerKey - The Cirrus server connection key
+     * @param {string} cirrusAddress - The address:port of the Cirrus server
+     */
+    transitionToActive(token, cirrusServerKey, cirrusAddress) {
+        const session = this.sessions.get(token);
+        if (!session || session.state !== 'preparing') return;
+
+        const now = Date.now();
+        session.state = 'active';
+        session.cirrusServerKey = cirrusServerKey;
+        session.cirrusAddress = cirrusAddress;
+        session.expiresAt = now + (this.config.sessionDurationSeconds * 1000);
+
+        // Start the expiry timer now
+        session.expiryTimer = setTimeout(() => {
+            this._expireSession(token);
+        }, this.config.sessionDurationSeconds * 1000);
+
+        logging.log(`SessionManager: Session ${token.substring(0, 8)}... transitioned to active for ${cirrusAddress} (expires in ${this.config.sessionDurationSeconds}s)`);
+    }
+
+    /**
+     * Validate a session for reverse proxy access.
+     * Fast check used on every proxied request.
+     * @param {string} token
+     * @returns {{ valid: boolean, playerPort: number|null, state: string, reason?: string }}
+     */
+    validateForProxy(token) {
+        if (!token) return { valid: false, reason: 'no_token' };
+
+        const session = this.sessions.get(token);
+        if (!session) return { valid: false, reason: 'not_found' };
+        if (session.state === 'expired') return { valid: false, reason: 'expired' };
+
+        return {
+            valid: true,
+            playerPort: session.playerPort,
+            state: session.state
+        };
+    }
+
+    /**
+     * Find a session in 'preparing' state by its assigned player port.
+     * Used to link a booting instance to the session that requested it.
+     * @param {number} playerPort
+     * @returns {Object|null} Session info via getSession(), or null
+     */
+    findPreparingSessionByPort(playerPort) {
+        for (const session of this.sessions.values()) {
+            if (session.playerPort === playerPort && session.state === 'preparing') {
+                return this.getSession(session.token);
+            }
+        }
+        return null;
     }
 
     /**
@@ -94,6 +185,7 @@ class SessionManager {
             token: session.token,
             cirrusServerKey: session.cirrusServerKey,
             cirrusAddress: session.cirrusAddress,
+            playerPort: session.playerPort,
             timeRemainingSeconds: Math.ceil(timeRemainingMs / 1000),
             totalSeconds: this.config.sessionDurationSeconds,
             expired: session.state === 'expired',

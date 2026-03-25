@@ -212,6 +212,22 @@ class InstanceManager {
         }
     }
 
+    /**
+     * Mark an instance as occupied (a user has been assigned to it).
+     * Used by the reverse proxy flow where the session was created during spawning
+     * and the instance needs to transition from 'ready' to 'occupied' when activated.
+     * @param {number} playerPort - The player port of the instance to mark
+     */
+    markOccupied(playerPort) {
+        for (const [id, instance] of this.instances) {
+            if (instance.playerPort === playerPort && instance.state === 'ready') {
+                instance.state = 'occupied';
+                logging.log(`InstanceManager: Instance ${id.substring(0, 8)}... marked as occupied (port ${playerPort})`);
+                return;
+            }
+        }
+    }
+
     getStatus() {
         const statuses = [];
         for (const [id] of this.instances) statuses.push(this._getInstanceInfo(id));
@@ -359,6 +375,8 @@ class InstanceManager {
                 '--matchmaker_address', this.matchmakerConfig.address || '127.0.0.1',
                 '--matchmaker_port', String(this.matchmakerConfig.port || 9999),
                 '--public_ip', this.config.publicIp,
+                '--reverse-proxy',                    // Trust X-Forwarded-* headers from matchmaker proxy
+                '--reverse-proxy-num-proxies', '1',   // Single proxy layer (matchmaker)
                 ...this.config.signallingServerArgs
             ];
 

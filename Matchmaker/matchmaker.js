@@ -38,6 +38,12 @@ const defaultConfig = {
 		sessionWarnBeforeEndSeconds: 60,
 		reconnectGraceSeconds: 30,
 		cookieName: 'ps_session'
+	},
+
+	// Reverse Proxy configuration — routes all traffic through a single port
+	ReverseProxy: {
+		enabled: true,
+		proxyTimeout: 30000
 	}
 };
 
@@ -70,10 +76,20 @@ if (config.LogToFile) {
 const portPool = require('./modules/portPool.js');
 const sessionManager = require('./modules/sessionManager.js');
 const instanceManager = require('./modules/instanceManager.js');
+const proxyManager = require('./modules/proxyManager.js');
 
 // Determine if dynamic instance management is enabled
 const instanceManagerEnabled = config.InstanceManager && config.InstanceManager.enabled;
 const sessionManagerEnabled = config.SessionManager && config.SessionManager.enabled;
+const reverseProxyEnabled = config.ReverseProxy && config.ReverseProxy.enabled;
+
+// Initialize reverse proxy
+if (reverseProxyEnabled) {
+	proxyManager.init({
+		proxyTimeout: (config.ReverseProxy && config.ReverseProxy.proxyTimeout) || 30000
+	});
+	logging.log('Reverse proxy enabled — all traffic will be routed through a single port');
+}
 
 // A list of all the Cirrus server which are connected to the Matchmaker.
 var cirrusServers = new Map();
@@ -313,10 +329,13 @@ if (sessionManagerEnabled) {
 			return res.status(404).json({ error: 'Session not found', expired: true });
 		}
 
-		// Include the redirect URL so the overlay/queue page can navigate back
-		const redirectUrl = session.cirrusAddress
-			? `${config.UseHTTPS ? 'https' : 'http'}://${session.cirrusAddress}/?ss=${config.UseHTTPS ? 'wss' : 'ws'}://${session.cirrusAddress}`
-			: null;
+		// Build redirect URL — use session-based path when reverse proxy is enabled
+		let redirectUrl = null;
+		if (reverseProxyEnabled) {
+			redirectUrl = `/session/${req.params.token}/`;
+		} else if (session.cirrusAddress) {
+			redirectUrl = `${config.UseHTTPS ? 'https' : 'http'}://${session.cirrusAddress}/?ss=${config.UseHTTPS ? 'wss' : 'ws'}://${session.cirrusAddress}`;
+		}
 
 		res.json({
 			timeRemainingSeconds: session.timeRemainingSeconds,
@@ -379,6 +398,127 @@ if (instanceManagerEnabled) {
 }
 
 // ============================================================================
+// Reverse Proxy Routes (session-based routing)
+// ============================================================================
+
+if (reverseProxyEnabled && sessionManagerEnabled) {
+	/**
+	 * Helper: parse cookies from a raw cookie header string.
+	 * Needed for WebSocket upgrade events where cookie-parser middleware doesn't run.
+	 */
+	function parseCookies(cookieHeader) {
+		const cookies = {};
+		if (!cookieHeader) return cookies;
+		cookieHeader.split(';').forEach(cookie => {
+			const parts = cookie.trim().split('=');
+			const name = parts[0];
+			const value = parts.slice(1).join('=');
+			if (name) cookies[name] = decodeURIComponent(value);
+		});
+		return cookies;
+	}
+
+	/**
+	 * Send the loading page while an instance is booting.
+	 * Injects the sessionId for status polling.
+	 */
+	function sendLoadingPage(res, sessionId) {
+		try {
+			let html = fs.readFileSync(path.join(__dirname, `${htmlDirectory}/loading/loading.html`), { encoding: 'utf8' });
+			html = html.replace(/\$\{sessionId\}/gm, sessionId);
+			res.setHeader('content-type', 'text/html');
+			res.send(html);
+		} catch (err) {
+			logging.error(`Failed to read loading page: ${err.message}`);
+			res.setHeader('content-type', 'text/html');
+			res.send(`
+				<html><body style="background:#1a1a2e;color:#eee;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0">
+				<div style="text-align:center">
+					<h2>Preparing your experience...</h2>
+					<p>Please wait while your instance starts up.</p>
+					<script>setTimeout(() => location.reload(), 3000);</script>
+				</div></body></html>
+			`);
+		}
+	}
+
+	/**
+	 * Session proxy route — serves loading page or proxies to Wilbur instance.
+	 * Express `app.use('/session/:sessionId', ...)` automatically strips the
+	 * mount path from req.url, so /session/abc123/index.js → req.url = /index.js
+	 */
+	app.use('/session/:sessionId', (req, res) => {
+		const sessionId = req.params.sessionId;
+
+		// Validate UUID format to prevent injection
+		if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+			return res.status(400).send('Invalid session ID');
+		}
+
+		// Validate session cookie matches the URL session ID
+		const cookieToken = req.cookies[sessionManager.getCookieName()];
+		if (cookieToken !== sessionId) {
+			return res.status(403).send('Access denied');
+		}
+
+		const validation = sessionManager.validateForProxy(sessionId);
+		if (!validation.valid) {
+			if (validation.reason === 'not_found') return res.status(404).send('Session not found');
+			if (validation.reason === 'expired') return res.status(410).send('Session expired');
+			return res.status(403).send('Access denied');
+		}
+
+		// If instance is still booting, serve loading page
+		if (validation.state === 'preparing') {
+			return sendLoadingPage(res, sessionId);
+		}
+
+		// Proxy to internal Wilbur instance
+		proxyManager.proxyHttp(validation.playerPort, req, res);
+	});
+
+	/**
+	 * WebSocket upgrade handler for reverse proxy.
+	 * Attached to the raw HTTP server since Express doesn't handle 'upgrade' events.
+	 * The PS frontend connects to ws://host:port/session/<uuid>/ and we proxy to
+	 * ws://127.0.0.1:<playerPort>/
+	 */
+	http.on('upgrade', (req, socket, head) => {
+		// Match /session/<uuid> with optional trailing path and query string
+		const match = req.url.match(/^\/session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/[^?]*)?(\?.*)?$/i);
+		if (!match) {
+			socket.destroy();
+			return;
+		}
+
+		const sessionId = match[1];
+		const remainingPath = (match[2] || '/') + (match[3] || '');
+
+		// Parse cookies manually (cookie-parser middleware doesn't run on upgrade events)
+		const cookies = parseCookies(req.headers.cookie);
+		const cookieToken = cookies[sessionManager.getCookieName()];
+
+		if (cookieToken !== sessionId) {
+			logging.log(`WebSocket upgrade denied: cookie mismatch for session ${sessionId.substring(0, 8)}...`);
+			socket.destroy();
+			return;
+		}
+
+		const validation = sessionManager.validateForProxy(sessionId);
+		if (!validation.valid || validation.state === 'preparing') {
+			logging.log(`WebSocket upgrade denied: session ${sessionId.substring(0, 8)}... state=${validation.state || validation.reason}`);
+			socket.destroy();
+			return;
+		}
+
+		// Rewrite URL to strip the /session/<uuid> prefix before proxying
+		req.url = remainingPath;
+		logging.log(`WebSocket upgrade: proxying session ${sessionId.substring(0, 8)}... to port ${validation.playerPort} (path: ${remainingPath})`);
+		proxyManager.proxyWs(validation.playerPort, req, socket, head);
+	});
+}
+
+// ============================================================================
 // Redirection / Main Entry Point
 // ============================================================================
 
@@ -392,12 +532,18 @@ if(enableRedirectionLinks) {
 				const existingSession = sessionManager.getSession(sessionToken);
 				if (existingSession && !existingSession.expired) {
 					// Valid session exists — redirect back to the same instance
-					const prefix = config.UseHTTPS ? 'https://' : 'http://';
-					const wsPrefix = config.UseHTTPS ? 'wss' : 'ws';
 					sessionManager.cancelGrace(sessionToken);
-					const addr = existingSession.cirrusAddress;
-					logging.log(`Session reconnect: redirecting to ${addr}`);
-					return res.redirect(`${prefix}${addr}/?ss=${wsPrefix}://${addr}`);
+
+					if (reverseProxyEnabled) {
+						logging.log(`Session reconnect: redirecting to /session/${sessionToken.substring(0, 8)}...`);
+						return res.redirect(`/session/${sessionToken}/`);
+					} else {
+						const prefix = config.UseHTTPS ? 'https://' : 'http://';
+						const wsPrefix = config.UseHTTPS ? 'wss' : 'ws';
+						const addr = existingSession.cirrusAddress;
+						logging.log(`Session reconnect: redirecting to ${addr}`);
+						return res.redirect(`${prefix}${addr}/?ss=${wsPrefix}://${addr}`);
+					}
 				} else {
 					// Expired or invalid session — clear the cookie
 					res.clearCookie(sessionManager.getCookieName());
@@ -408,10 +554,9 @@ if(enableRedirectionLinks) {
 		// --- Normal flow: find available server ---
 		cirrusServer = getAvailableCirrusServer();
 		if (cirrusServer != undefined) {
-			// Create session if session manager is enabled
 			if (sessionManagerEnabled) {
 				const connectionKey = getConnectionKeyForServer(cirrusServer);
-				const { token } = sessionManager.createSession(connectionKey, `${cirrusServer.address}:${cirrusServer.port}`);
+				const { token } = sessionManager.createSession(connectionKey, `${cirrusServer.address}:${cirrusServer.port}`, cirrusServer.port);
 
 				// Set session cookie
 				res.cookie(sessionManager.getCookieName(), token, {
@@ -421,14 +566,20 @@ if(enableRedirectionLinks) {
 					maxAge: config.SessionManager.sessionDurationSeconds * 1000
 				});
 
-				// Set matchmaker URL cookie so the overlay knows where to call the session API
+				if (reverseProxyEnabled) {
+					// Redirect to session-based proxy path (no ss param needed)
+					logging.log(`Redirect to /session/${token.substring(0, 8)}... (proxy to port ${cirrusServer.port})`);
+					return res.redirect(`/session/${token}/`);
+				}
+
+				// Legacy: Set matchmaker URL cookie so the overlay knows where to call the session API
 				res.cookie('ps_matchmaker', `${config.UseHTTPS ? 'https' : 'http'}://localhost:${config.HttpPort}`, {
 					path: '/',
 					maxAge: config.SessionManager.sessionDurationSeconds * 1000
 				});
 			}
 
-			// Redirect with ?ss= WebSocket URL parameter
+			// Legacy: Redirect with ?ss= WebSocket URL parameter (when reverse proxy is disabled)
 			const { pageUrl, logUrl } = buildRedirectUrl(cirrusServer);
 			res.redirect(pageUrl);
 			logging.log(`Redirect to ${logUrl}`);
@@ -437,6 +588,21 @@ if(enableRedirectionLinks) {
 			const newInstance = instanceManager.requestInstance();
 			if (newInstance) {
 				logging.log(`Spawning new instance on ports player:${newInstance.playerPort} streamer:${newInstance.streamerPort}`);
+
+				// When reverse proxy + session manager enabled, create preparing session immediately
+				if (reverseProxyEnabled && sessionManagerEnabled) {
+					const { token } = sessionManager.createPreparingSession(newInstance.playerPort);
+					res.cookie(sessionManager.getCookieName(), token, {
+						httpOnly: true,
+						sameSite: 'strict',
+						path: '/',
+						maxAge: (config.SessionManager.sessionDurationSeconds + 120) * 1000  // Extra time for boot
+					});
+					logging.log(`Created preparing session ${token.substring(0, 8)}... for port ${newInstance.playerPort}`);
+					return res.redirect(`/session/${token}/`);
+				}
+
+				// Legacy: show retry/queue page
 				sendRetryResponse(res, {
 					queuePosition: 1,
 					queueLength: 0,
@@ -548,6 +714,21 @@ const matchmaker = net.createServer((connection) => {
 				if (instanceManagerEnabled) {
 					instanceManager.markReady(connection);
 				}
+
+				// Transition any 'preparing' session to 'active' now that the instance is ready
+				if (reverseProxyEnabled && sessionManagerEnabled) {
+					const preparingSession = sessionManager.findPreparingSessionByPort(cirrusServer.port);
+					if (preparingSession) {
+						sessionManager.transitionToActive(
+							preparingSession.token,
+							connection,
+							`${cirrusServer.address}:${cirrusServer.port}`
+						);
+						// Mark instance as occupied so it won't be re-assigned to another user
+						instanceManager.markOccupied(cirrusServer.port);
+						logging.log(`Session ${preparingSession.token.substring(0, 8)}... activated for port ${cirrusServer.port}`);
+					}
+				}
 			} else {
 				disconnect(connection);
 			}
@@ -631,6 +812,9 @@ matchmaker.listen(config.MatchmakerPort, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
 	console.log('Matchmaker shutting down...');
+	if (reverseProxyEnabled) {
+		proxyManager.shutdown();
+	}
 	if (instanceManagerEnabled) {
 		instanceManager.shutdown();
 	}
@@ -639,6 +823,9 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
 	console.log('Matchmaker shutting down...');
+	if (reverseProxyEnabled) {
+		proxyManager.shutdown();
+	}
 	if (instanceManagerEnabled) {
 		instanceManager.shutdown();
 	}

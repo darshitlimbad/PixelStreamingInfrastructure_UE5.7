@@ -197,7 +197,10 @@ export class Config {
                           // for readability, we omit the port if it's 80
                           (window.location.port === '80' || window.location.port === ''
                               ? ''
-                              : `:${window.location.port}`),
+                              : `:${window.location.port}`) +
+                          // include pathname so reverse-proxied sessions route correctly
+                          // e.g. /session/<uuid>/ → ws://host:port/session/<uuid>/
+                          window.location.pathname,
                 useUrlParams
             )
         );
