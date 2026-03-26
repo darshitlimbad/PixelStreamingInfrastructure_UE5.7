@@ -41,8 +41,16 @@ class ProxyManager {
         });
 
         // Handle proxy errors for HTTP requests
+        // ECONNRESET and ECONNABORTED are expected when an instance terminates while
+        // a client is still connected (race condition during cleanup). Log at lower severity.
         this.proxy.on('error', (err, req, res) => {
-            logging.error(`ProxyManager: HTTP proxy error for ${req.url}: ${err.message}`);
+            const isCleanupError = (err.code === 'ECONNRESET' || err.code === 'ECONNABORTED' || err.code === 'EPIPE');
+
+            if (isCleanupError) {
+                logging.log(`ProxyManager: Connection closed for ${req.url} (${err.code}) — instance likely terminated`);
+            } else {
+                logging.error(`ProxyManager: HTTP proxy error for ${req.url}: ${err.message}`);
+            }
 
             // res might be a Socket (for WS errors) — only send HTTP response if it's a ServerResponse
             if (res && typeof res.writeHead === 'function' && !res.headersSent) {
@@ -52,6 +60,9 @@ class ProxyManager {
                 } else if (err.code === 'ETIMEDOUT' || err.code === 'ESOCKETTIMEDOUT') {
                     res.writeHead(504, { 'Content-Type': 'text/plain' });
                     res.end('Gateway Timeout: Instance did not respond in time');
+                } else if (isCleanupError) {
+                    res.writeHead(502, { 'Content-Type': 'text/plain' });
+                    res.end('Instance terminated. Please refresh to reconnect.');
                 } else {
                     res.writeHead(502, { 'Content-Type': 'text/plain' });
                     res.end('Bad Gateway: Proxy error');
@@ -114,12 +125,23 @@ class ProxyManager {
         const target = `ws://127.0.0.1:${playerPort}`;
 
         // Handle socket-level errors to prevent unhandled exceptions
+        // ECONNRESET/ECONNABORTED/EPIPE are expected when instance terminates mid-connection
         socket.on('error', (err) => {
-            logging.error(`ProxyManager: WebSocket socket error on port ${playerPort}: ${err.message}`);
+            const isCleanupError = (err.code === 'ECONNRESET' || err.code === 'ECONNABORTED' || err.code === 'EPIPE');
+            if (isCleanupError) {
+                logging.log(`ProxyManager: WebSocket closed on port ${playerPort} (${err.code}) — instance likely terminated`);
+            } else {
+                logging.error(`ProxyManager: WebSocket socket error on port ${playerPort}: ${err.message}`);
+            }
         });
 
         this.proxy.ws(req, socket, head, { target }, (err) => {
-            logging.error(`ProxyManager: WebSocket proxy error to port ${playerPort}: ${err.message}`);
+            const isCleanupError = (err.code === 'ECONNRESET' || err.code === 'ECONNABORTED' || err.code === 'EPIPE');
+            if (isCleanupError) {
+                logging.log(`ProxyManager: WebSocket to port ${playerPort} closed (${err.code}) — instance likely terminated`);
+            } else {
+                logging.error(`ProxyManager: WebSocket proxy error to port ${playerPort}: ${err.message}`);
+            }
             socket.destroy();
         });
     }

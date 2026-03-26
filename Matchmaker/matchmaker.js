@@ -236,6 +236,16 @@ if(config.EnableWebserver) {
 	}
 }
 
+// Load landing page configuration
+let landingConfig = { title: 'Pixel Streaming', description: '', buttonText: 'Start Experience', ogImage: '', ogType: 'website', twitterCard: 'summary_large_image' };
+try {
+	const landingConfigData = JSON.parse(fs.readFileSync(path.join(__dirname, 'landing.config.json'), 'utf8'));
+	landingConfig = { ...landingConfig, ...landingConfigData };
+	logging.log(`Landing page config loaded: "${landingConfig.title}"`);
+} catch (e) {
+	logging.log('Landing page config not found, using defaults');
+}
+
 // No servers are available so send some simple JavaScript to the client to make
 // it retry after a short period of time.
 function sendRetryResponse(res, extraData) {
@@ -253,6 +263,22 @@ function sendRetryResponse(res, extraData) {
 
 	res.setHeader('content-type', 'text/html')
 	res.send(html)
+}
+
+// Send the landing page with OG meta tags (safe for bots, no instance spawning).
+function sendLandingPage(res) {
+	try {
+		let html = fs.readFileSync(path.join(__dirname, `${htmlDirectory}/landing/landing.html`), { encoding: 'utf8' });
+		for (const [key, value] of Object.entries(landingConfig)) {
+			html = html.replace(new RegExp(`\\$\\{${key}\\}`, 'gm'), String(value));
+		}
+		res.setHeader('content-type', 'text/html');
+		res.send(html);
+	} catch (err) {
+		logging.error(`Failed to read landing page: ${err.message}`);
+		// Fallback: redirect straight to /join (old behavior)
+		res.redirect('/join');
+	}
 }
 
 // Get a Cirrus server if there is one available which has no clients connected.
@@ -523,15 +549,16 @@ if (reverseProxyEnabled && sessionManagerEnabled) {
 // ============================================================================
 
 if(enableRedirectionLinks) {
-	// Handle standard URL.
+	// Landing page — serves static HTML with OG meta tags.
+	// Bots (Discord, Slack, etc.) get embed metadata without triggering instance spawning.
+	// Real users click "Start Experience" which hits GET /join.
 	app.get('/', (req, res) => {
-		// --- Session reconnection check ---
+		// If user already has a valid session, redirect them back (skip landing page)
 		if (sessionManagerEnabled) {
 			const sessionToken = req.cookies[sessionManager.getCookieName()];
 			if (sessionToken) {
 				const existingSession = sessionManager.getSession(sessionToken);
 				if (existingSession && !existingSession.expired) {
-					// Valid session exists — redirect back to the same instance
 					sessionManager.cancelGrace(sessionToken);
 
 					if (reverseProxyEnabled) {
@@ -551,14 +578,42 @@ if(enableRedirectionLinks) {
 			}
 		}
 
-		// --- Normal flow: find available server ---
+		// No valid session — serve the landing page
+		sendLandingPage(res);
+	});
+
+	// Join endpoint — this is where instance assignment/spawning actually happens.
+	// Only reached when a real user clicks "Start Experience" on the landing page.
+	app.get('/join', (req, res) => {
+		// --- Session reconnection check ---
+		if (sessionManagerEnabled) {
+			const sessionToken = req.cookies[sessionManager.getCookieName()];
+			if (sessionToken) {
+				const existingSession = sessionManager.getSession(sessionToken);
+				if (existingSession && !existingSession.expired) {
+					sessionManager.cancelGrace(sessionToken);
+
+					if (reverseProxyEnabled) {
+						return res.redirect(`/session/${sessionToken}/`);
+					} else {
+						const prefix = config.UseHTTPS ? 'https://' : 'http://';
+						const wsPrefix = config.UseHTTPS ? 'wss' : 'ws';
+						const addr = existingSession.cirrusAddress;
+						return res.redirect(`${prefix}${addr}/?ss=${wsPrefix}://${addr}`);
+					}
+				} else {
+					res.clearCookie(sessionManager.getCookieName());
+				}
+			}
+		}
+
+		// --- Find available server or spawn new instance ---
 		cirrusServer = getAvailableCirrusServer();
 		if (cirrusServer != undefined) {
 			if (sessionManagerEnabled) {
 				const connectionKey = getConnectionKeyForServer(cirrusServer);
 				const { token } = sessionManager.createSession(connectionKey, `${cirrusServer.address}:${cirrusServer.port}`, cirrusServer.port);
 
-				// Set session cookie
 				res.cookie(sessionManager.getCookieName(), token, {
 					httpOnly: true,
 					sameSite: 'strict',
@@ -567,49 +622,44 @@ if(enableRedirectionLinks) {
 				});
 
 				if (reverseProxyEnabled) {
-					// Redirect to session-based proxy path (no ss param needed)
 					logging.log(`Redirect to /session/${token.substring(0, 8)}... (proxy to port ${cirrusServer.port})`);
 					return res.redirect(`/session/${token}/`);
 				}
 
-				// Legacy: Set matchmaker URL cookie so the overlay knows where to call the session API
+				// Legacy: Set matchmaker URL cookie
 				res.cookie('ps_matchmaker', `${config.UseHTTPS ? 'https' : 'http'}://localhost:${config.HttpPort}`, {
 					path: '/',
 					maxAge: config.SessionManager.sessionDurationSeconds * 1000
 				});
 			}
 
-			// Legacy: Redirect with ?ss= WebSocket URL parameter (when reverse proxy is disabled)
+			// Legacy: Redirect with ?ss= WebSocket URL parameter
 			const { pageUrl, logUrl } = buildRedirectUrl(cirrusServer);
 			res.redirect(pageUrl);
 			logging.log(`Redirect to ${logUrl}`);
 		} else if (instanceManagerEnabled) {
-			// No servers available — try spawning a new one
 			const newInstance = instanceManager.requestInstance();
 			if (newInstance) {
 				logging.log(`Spawning new instance on ports player:${newInstance.playerPort} streamer:${newInstance.streamerPort}`);
 
-				// When reverse proxy + session manager enabled, create preparing session immediately
 				if (reverseProxyEnabled && sessionManagerEnabled) {
 					const { token } = sessionManager.createPreparingSession(newInstance.playerPort);
 					res.cookie(sessionManager.getCookieName(), token, {
 						httpOnly: true,
 						sameSite: 'strict',
 						path: '/',
-						maxAge: (config.SessionManager.sessionDurationSeconds + 120) * 1000  // Extra time for boot
+						maxAge: (config.SessionManager.sessionDurationSeconds + 120) * 1000
 					});
 					logging.log(`Created preparing session ${token.substring(0, 8)}... for port ${newInstance.playerPort}`);
 					return res.redirect(`/session/${token}/`);
 				}
 
-				// Legacy: show retry/queue page
 				sendRetryResponse(res, {
 					queuePosition: 1,
 					queueLength: 0,
 					status: 'spawning'
 				});
 			} else {
-				// At max capacity — send queue page with position
 				const queueStatus = sessionManagerEnabled ? sessionManager.getQueueStatus() : { queueLength: 0 };
 				sendRetryResponse(res, {
 					queuePosition: queueStatus.queueLength + 1,
@@ -647,17 +697,70 @@ function disconnect(connection) {
 }
 
 const matchmaker = net.createServer((connection) => {
-	connection.on('data', (data) => {
-		try {
-			message = JSON.parse(data);
+	// Buffer for handling fragmented/concatenated TCP messages
+	let dataBuffer = '';
 
-			if(message)
-				console.log(`Message TYPE: ${message.type}`);
-		} catch(e) {
-			console.log(`ERROR (${e.toString()}): Failed to parse Cirrus information from data: ${data.toString()}`);
-			disconnect(connection);
-			return;
+	connection.on('data', (data) => {
+		// TCP can deliver multiple JSON messages in one chunk or split one across chunks.
+		// Append to buffer and extract complete JSON objects.
+		dataBuffer += data.toString();
+
+		let messages = [];
+		// Extract all complete JSON objects from the buffer
+		while (dataBuffer.length > 0) {
+			dataBuffer = dataBuffer.trimStart();
+			if (dataBuffer.length === 0) break;
+			if (dataBuffer[0] !== '{') {
+				// Invalid data — discard up to next '{'
+				const nextBrace = dataBuffer.indexOf('{');
+				if (nextBrace === -1) {
+					dataBuffer = '';
+					break;
+				}
+				dataBuffer = dataBuffer.substring(nextBrace);
+			}
+
+			// Try to parse a JSON object from the start of the buffer
+			let parsed = null;
+			let endIndex = -1;
+
+			// Find matching closing brace by tracking depth
+			let depth = 0;
+			let inString = false;
+			let escaped = false;
+			for (let i = 0; i < dataBuffer.length; i++) {
+				const ch = dataBuffer[i];
+				if (escaped) { escaped = false; continue; }
+				if (ch === '\\' && inString) { escaped = true; continue; }
+				if (ch === '"') { inString = !inString; continue; }
+				if (inString) continue;
+				if (ch === '{') depth++;
+				else if (ch === '}') {
+					depth--;
+					if (depth === 0) { endIndex = i; break; }
+				}
+			}
+
+			if (endIndex === -1) {
+				// Incomplete JSON — wait for more data
+				break;
+			}
+
+			const jsonStr = dataBuffer.substring(0, endIndex + 1);
+			try {
+				parsed = JSON.parse(jsonStr);
+				messages.push(parsed);
+				dataBuffer = dataBuffer.substring(endIndex + 1);
+			} catch (e) {
+				console.log(`ERROR: Failed to parse JSON chunk: ${jsonStr.substring(0, 100)}...`);
+				dataBuffer = dataBuffer.substring(endIndex + 1);
+			}
 		}
+
+		// Process each extracted message
+		for (const message of messages) {
+		console.log(`Message TYPE: ${message.type}`);
+
 		if (message.type === 'connect') {
 			// A Cirrus server connects to this Matchmaker server.
 			cirrusServer = {
@@ -791,6 +894,7 @@ const matchmaker = net.createServer((connection) => {
 			console.log('ERROR: Unknown data: ' + JSON.stringify(message));
 			disconnect(connection);
 		}
+		} // end for (const message of messages)
 	});
 
 	// A Cirrus server disconnects from this Matchmaker server.
